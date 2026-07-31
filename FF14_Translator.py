@@ -1,17 +1,17 @@
 import os
 import sys
 import time
+import re
 import requests
-import pyperclip
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 from PIL import Image, ImageGrab
+import pyperclip
 
 # ==================== Azure 設定 (優先讀取 config.txt，其次讀取環境變數) ====================
 AZURE_KEY = None
 AZURE_ENDPOINT = None
 
-# 1. 嘗試從同資料夾下的 config.txt 讀取
 config_file = "config.txt"
 if os.path.exists(config_file):
     try:
@@ -25,167 +25,103 @@ if os.path.exists(config_file):
     except Exception as e:
         print(f"讀取 config.txt 失敗: {e}")
 
-# 2. 如果 config.txt 沒拿到，再嘗試從系統環境變數讀取
 if not AZURE_KEY:
     AZURE_KEY = os.getenv("AZURE_KEY")
 if not AZURE_ENDPOINT:
     AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 
-# ==================== 1. Azure Vision OCR 核心 ====================
-def ocr_japanese_image(image_path):
-    """呼叫 Azure Computer Vision Read API 進行日文 OCR"""
-    if not AZURE_KEY or not AZURE_ENDPOINT:
-        return "錯誤：未設定 AZURE_KEY 或 AZURE_ENDPOINT 環境變數。"
 
-    read_url = f"{AZURE_ENDPOINT.rstrip('/')}/vision/v3.2/read/analyze"
+# ==================== 翻譯功能 (使用免費 Google Translate API) ====================
+def translate_ja_to_zh(text):
+    """將日文翻譯成繁體中文"""
+    if not text or not text.strip():
+        return ""
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "ja",
+            "tl": "zh-TW",
+            "dt": "t",
+            "q": text
+        }
+        res = requests.get(url, params=params, timeout=5)
+        if res.status_code == 200:
+            result = res.json()
+            translated_lines = [item[0] for item in result[0] if item[0]]
+            return "".join(translated_lines)
+        else:
+            return "（翻譯失敗：網路請求錯誤）"
+    except Exception as e:
+        return f"（翻譯失敗：{str(e)}）"
+
+
+# ==================== OCR 辨識功能 ====================
+def ocr_japanese_image(image_path):
+    """呼叫 Azure Computer Vision 標準同步 OCR 進行日文辨識"""
+    if not AZURE_KEY or not AZURE_ENDPOINT:
+        return "錯誤：未設定 AZURE_KEY 或 AZURE_ENDPOINT。"
+
+    clean_endpoint = AZURE_ENDPOINT.rstrip('/')
+    ocr_url = f"{clean_endpoint}/vision/v3.2/ocr?language=ja&detectOrientation=true"
+    
     headers = {
-        'Ocp-Apim-Subscription-Key': AZURE_KEY,
+        'Ocp-Apim-Subscription-Key': AZURE_KEY.strip(),
         'Content-Type': 'application/octet-stream'
     }
     
     try:
         with open(image_path, "rb") as image_file:
-            response = requests.post(read_url, headers=headers, data=image_file)
+            img_bytes = image_file.read()
+            response = requests.post(ocr_url, headers=headers, data=img_bytes)
             
-        if response.status_code != 202:
-            return f"OCR 請求失敗 (Status: {response.status_code})，請檢查 Key 或 Endpoint。"
+        if response.status_code != 200:
+            return f"OCR 請求失敗 (Status: {response.status_code})\n回應內容: {response.text}"
 
-        # Read API 是非同步的，需要輪詢取得結果
-        operation_url = response.headers.get("Operation-Location")
-        if not operation_url:
-            return "無法取得 Operation-Location 標頭。"
-
-        while True:
-            result_response = requests.get(operation_url, headers={'Ocp-Apim-Subscription-Key': AZURE_KEY})
-            result_json = result_response.json()
-            if result_json.get("status") not in ["notStarted", "running"]:
-                break
-            time.sleep(0.5)
-
+        result = response.json()
         extracted_lines = []
-        if result_json.get("status") == "succeeded":
-            read_results = result_json["analyzeResult"]["readResults"]
-            for page in read_results:
-                for line in page["lines"]:
-                    extracted_lines.append(line["text"])
+        
+        for region in result.get("regions", []):
+            for line in region.get("lines", []):
+                line_text = "".join([word.get("text", "") for word in line.get("words", [])])
+                extracted_lines.append(line_text)
                     
         return "\n".join(extracted_lines) if extracted_lines else "未辨識到日文文字。"
 
     except Exception as e:
         return f"發生錯誤: {str(e)}"
 
-# ==================== 2. FF14 常用情境與生成回覆引擎 ====================
-def generate_ff14_replies(text):
-    """根據辨識出的日文，提供中文理解與 3 個常用 FF14 日文回覆"""
-    
-    # 預設通用回覆
-    replies = [
-        "よろしくお願いします！ (請多指教！)",
-        "お疲れ様でした！ (辛苦了！)",
-        "ありがとうございます！ (非常感謝！)"
-    ]
-    
-    # 情境判斷
-    if "おつ" in text or "疲" in text or "おつかれ" in text:
-        replies = [
-            "お疲れ様でした！ありがとうございました！ (辛苦了！非常感謝！)",
-            "お疲れ様でした～！またよろしくお願いします！ (辛苦了~ 下次也請多指教！)",
-            "おつです！ (辛苦囉！ - 簡短版)"
-        ]
-    elif "よろしく" in text or "初" in text:
-        replies = [
-            "よろしくお願いします！ (請多指教！)",
-            "初見です、よろしくお願いします！ (第一次打/初見，請多指教！)",
-            "不慣れですがよろしくお願いします！ (不太熟練但請多指教！)"
-        ]
-    elif "行" in text or "どこ" in text or "次" in text:
-        replies = [
-            "どこでも大丈夫ですよ！ (去哪裡都可以喔！)",
-            "ルードレット行きたいです！ (想去隨機副本！)",
-            "すみません、今日はこれで落ちます！ (不好意思，我今天先下了！)"
-        ]
-    elif "どんまい" in text or "donmai" in text or "大丈夫" in text:
-        replies = [
-            "どんまいです！次行きましょう！ (別介意！繼續下一把吧！)",
-            "大丈夫ですよ！気になさらないでください！ (沒關係的！請別介意！)",
-            "次頑張りましょう！ (下次加油！)"
-        ]
 
-    return replies
+# ==================== GUI 截圖與區域選擇 ====================
+class ScreenSnipper:
+    def __init__(self, callback):
+        self.callback = callback
+        self.sniper_win = tk.Toplevel()
+        self.sniper_win.attributes("-alpha", 0.3)
+        self.sniper_win.attributes("-fullscreen", True)
+        self.sniper_win.attributes("-topmost", True)
+        self.sniper_win.config(cursor="cross")
 
-# ==================== 3. Tkinter 半透明懸浮 GUI 介面 ====================
-class FF14TranslatorApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("FF14 對話助手")
-        self.root.geometry("420x460+100+100")
-        self.root.attributes("-topmost", True)  # 保持在最上層
-        self.root.attributes("-alpha", 0.92)    # 微透明
-        self.root.configure(bg="#1e1e2e")
-
-        # 標題欄
-        lbl_title = tk.Label(root, text="⚔️ FF14 日文對話翻譯助手", font=("Microsoft JhengHei", 12, "bold"), fg="#cdd6f4", bg="#1e1e2e")
-        lbl_title.pack(pady=8)
-
-        # 環境變數狀態提示
-        env_status_text = "✅ Azure 金鑰狀態：已載入" if (AZURE_KEY and AZURE_ENDPOINT) else "❌ Azure 金鑰狀態：未設定"
-        env_status_color = "#a6e3a1" if (AZURE_KEY and AZURE_ENDPOINT) else "#f38ba8"
-        lbl_env = tk.Label(root, text=env_status_text, font=("Microsoft JhengHei", 8), fg=env_status_color, bg="#1e1e2e")
-        lbl_env.pack(pady=(0, 5))
-
-        # 按鈕區
-        btn_frame = tk.Frame(root, bg="#1e1e2e")
-        btn_frame.pack(pady=5)
-
-        self.btn_capture = tk.Button(btn_frame, text="📸 選擇區域並翻譯", font=("Microsoft JhengHei", 10, "bold"), 
-                                     bg="#89b4fa", fg="#11111b", command=self.start_crop)
-        self.btn_capture.pack(side=tk.LEFT, padx=5)
-
-        # 顯示 OCR 擷取到的日文
-        tk.Label(root, text="【辨識到的日文】", font=("Microsoft JhengHei", 9, "bold"), fg="#a6adc8", bg="#1e1e2e").pack(anchor="w", padx=15)
-        self.txt_jp = tk.Text(root, height=3, width=48, font=("Yu Gothic", 9), bg="#313244", fg="#a6e3a1", wrap=tk.WORD)
-        self.txt_jp.pack(padx=15, pady=2)
-
-        # 顯示建議回覆區
-        tk.Label(root, text="【點擊按鈕自動複製日文回覆】", font=("Microsoft JhengHei", 9, "bold"), fg="#a6adc8", bg="#1e1e2e").pack(anchor="w", padx=15, pady=(8, 0))
-        
-        self.reply_buttons = []
-        for i in range(3):
-            btn = tk.Button(root, text=f"回覆 {i+1}", font=("Microsoft JhengHei", 9), bg="#45475a", fg="#cdd6f4", 
-                            anchor="w", justify=tk.LEFT, command=lambda idx=i: self.copy_reply(idx))
-            btn.pack(fill=tk.X, padx=15, pady=3)
-            self.reply_buttons.append(btn)
-
-        # 狀態欄
-        self.lbl_status = tk.Label(root, text="準備就緒，點擊上方按鈕開始", font=("Microsoft JhengHei", 8), fg="#9399b2", bg="#1e1e2e")
-        self.lbl_status.pack(side=tk.BOTTOM, pady=5)
-
-        self.current_replies = []
-
-    def start_crop(self):
-        if not AZURE_KEY or not AZURE_ENDPOINT:
-            messagebox.showerror("錯誤", "找不到 Azure 環境變數！請設定 AZURE_KEY 與 AZURE_ENDPOINT 後再執行。")
-            return
-
-        self.root.iconify()
-        time.sleep(0.2)
-        
-        self.crop_win = tk.Toplevel()
-        self.crop_win.attributes("-fullscreen", True)
-        self.crop_win.attributes("-alpha", 0.3)
-        self.crop_win.configure(cursor="cross")
-
-        self.canvas = tk.Canvas(self.crop_win, cursor="cross", bg="grey")
+        self.canvas = tk.Canvas(self.sniper_win, cursor="cross", bg="grey")
         self.canvas.pack(fill="both", expand=True)
 
         self.canvas.bind("<ButtonPress-1>", self.on_button_press)
         self.canvas.bind("<B1-Motion>", self.on_move_press)
         self.canvas.bind("<ButtonRelease-1>", self.on_button_release)
 
+        self.start_x = None
+        self.start_y = None
+        self.rect = None
+
     def on_button_press(self, event):
         self.start_x = event.x
         self.start_y = event.y
-        self.rect = self.canvas.create_rectangle(self.start_x, self.start_y, 1, 1, outline='red', width=2)
+        self.rect = self.canvas.create_rectangle(self.x, self.y, 1, 1, outline='red', width=2)
+
+    @property
+    def x(self): return self.start_x
+    @property
+    def y(self): return self.start_y
 
     def on_move_press(self, event):
         cur_x, cur_y = (event.x, event.y)
@@ -193,44 +129,120 @@ class FF14TranslatorApp:
 
     def on_button_release(self, event):
         end_x, end_y = (event.x, event.y)
-        self.crop_win.destroy()
-        self.root.deiconify()
-
+        self.sniper_win.destroy()
+        
         x1 = min(self.start_x, end_x)
         y1 = min(self.start_y, end_y)
         x2 = max(self.start_x, end_x)
         y2 = max(self.start_y, end_y)
 
-        if x2 - x1 < 10 or y2 - y1 < 10:
-            self.lbl_status.config(text="選取區域過小，已取消。")
-            return
+        if x2 - x1 > 10 and y2 - y1 > 10:
+            time.sleep(0.2)
+            img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+            temp_path = "temp_ocr.png"
+            img.save(temp_path)
+            self.callback(temp_path)
 
-        self.lbl_status.config(text="正在分析日文文字...")
+
+# ==================== 主介面 App ====================
+class TranslatorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("FF14 日文對話翻譯助手")
+        self.root.geometry("450x620")
+        self.root.attributes("-topmost", True)  # 保持視窗最上層，方便配搭遊戲
+        self.root.configure(bg="#2d2d2d")
+
+        # 標題
+        title_label = tk.Label(root, text="⚔️ FF14 日文對話翻譯助手", font=("Microsoft JhengHei", 14, "bold"), fg="#ffffff", bg="#2d2d2d")
+        title_label.pack(pady=8)
+
+        # 狀態標示
+        status_text = "✅ Azure 金鑰狀態：已載入" if (AZURE_KEY and AZURE_ENDPOINT) else "❌ 警告：未找到 Azure 金鑰/Endpoint"
+        status_color = "#55ff55" if (AZURE_KEY and AZURE_ENDPOINT) else "#ff5555"
+        self.status_label = tk.Label(root, text=status_text, font=("Microsoft JhengHei", 9), fg=status_color, bg="#2d2d2d")
+        self.status_label.pack(pady=2)
+
+        # 截圖按鈕
+        self.btn_snip = tk.Button(root, text="📷 選擇區域並翻譯", font=("Microsoft JhengHei", 11, "bold"), bg="#3a7bd5", fg="white", activebackground="#2a5ea5", command=self.start_snipping)
+        self.btn_snip.pack(pady=10, ipadx=10, ipady=3)
+
+        # 辨識出的日文文字框
+        lbl_ja = tk.Label(root, text="【辨識到的日文】", font=("Microsoft JhengHei", 9, "bold"), fg="#aaa", bg="#2d2d2d")
+        lbl_ja.pack(anchor="w", padx=15)
+        self.txt_ja = tk.Text(root, height=4, font=("Microsoft JhengHei", 9), bg="#1e1e1e", fg="#55ff55", insertbackground="white")
+        self.txt_ja.pack(fill="x", padx=15, pady=2)
+
+        # 翻譯後的中文文字框 (新增加！)
+        lbl_zh = tk.Label(root, text="【中文翻譯】", font=("Microsoft JhengHei", 9, "bold"), fg="#aaa", bg="#2d2d2d")
+        lbl_zh.pack(anchor="w", padx=15, pady=(5, 0))
+        self.txt_zh = tk.Text(root, height=4, font=("Microsoft JhengHei", 10), bg="#1e1e1e", fg="#ffff55", insertbackground="white")
+        self.txt_zh.pack(fill="x", padx=15, pady=2)
+
+        # 快速回覆按鈕區
+        lbl_reply = tk.Label(root, text="【點擊按鈕自動複製日文回覆】", font=("Microsoft JhengHei", 9, "bold"), fg="#aaa", bg="#2d2d2d")
+        lbl_reply.pack(anchor="w", padx=15, pady=(10, 0))
+
+        # 定義常用日文範本
+        self.quick_replies = [
+            ("よろしくお願いします！ (請多指教！)", "よろしくお願いします！"),
+            ("初見です、よろしくお願いします！ (初見，請多指教！)", "初見です、よろしくお願いします！"),
+            ("お疲れ様でした！ (辛苦了！)", "お疲れ様でした！"),
+            ("どんまいです！ (Don't mind / 沒關係！)", "どんまいです！"),
+            ("ありがとうございます！ (非常感謝！)", "ありがとうございます！")
+        ]
+
+        for label_text, copy_text in self.quick_replies:
+            btn = tk.Button(root, text=label_text, font=("Microsoft JhengHei", 9), bg="#383838", fg="#e0e0e0", anchor="w", command=lambda t=copy_text: self.copy_to_clipboard(t))
+            btn.pack(fill="x", padx=15, pady=2)
+
+        # 底部狀態列
+        self.lbl_status = tk.Label(root, text="準備就緒，點擊上方按鈕開始截圖", font=("Microsoft JhengHei", 9), fg="#888", bg="#2d2d2d")
+        self.lbl_status.pack(side="bottom", pady=8)
+
+    def start_snipping(self):
+        self.root.iconify()  # 最小化視窗
+        time.sleep(0.2)
+        ScreenSnipper(self.process_image)
+
+    def process_image(self, img_path):
+        self.root.deiconify()  # 恢復視窗
+        self.lbl_status.config(text="正在進行日文 OCR 辨識與翻譯...")
         self.root.update()
 
-        img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
-        temp_path = "ff14_chat_temp.png"
-        img.save(temp_path)
+        # 1. OCR 辨識
+        raw_ja = ocr_japanese_image(img_path)
+        
+        self.txt_ja.delete("1.0", tk.END)
+        self.txt_ja.insert(tk.END, raw_ja)
 
-        jp_text = ocr_japanese_image(temp_path)
-        self.txt_jp.delete("1.0", tk.END)
-        self.txt_jp.insert(tk.END, jp_text)
+        # 2. 清理 OCR 文字（移除 Channel 標記/玩家 ID，讓翻譯更準確）
+        cleaned_lines = []
+        for line in raw_ja.split("\n"):
+            # 移除常見的 FF14 頻道符號與 ID (例如: 7Aruka Haru % Hades))
+            clean_line = re.sub(r'^[0-9A-Za-z\s%&\(\)\*≪≫<>]+\)\s*', '', line)
+            cleaned_lines.append(clean_line if clean_line.strip() else line)
+        
+        text_for_trans = "\n".join(cleaned_lines)
 
-        self.current_replies = generate_ff14_replies(jp_text)
-        for i, reply in enumerate(self.current_replies):
-            self.reply_buttons[i].config(text=reply, bg="#313244", fg="#f5e0dc")
+        # 3. 翻譯成中文
+        if "錯誤" not in raw_ja and "失敗" not in raw_ja and raw_ja != "未辨識到日文文字。":
+            zh_text = translate_ja_to_zh(text_for_trans)
+        else:
+            zh_text = ""
 
-        self.lbl_status.config(text="分析完成！點擊按鈕即可複製回覆。")
+        self.txt_zh.delete("1.0", tk.END)
+        self.txt_zh.insert(tk.END, zh_text)
 
-    def copy_reply(self, idx):
-        if idx < len(self.current_replies):
-            full_text = self.current_replies[idx]
-            jp_only = full_text.split(" (")[0]
-            pyperclip.copy(jp_only)
-            self.lbl_status.config(text=f"已複製: {jp_only} （可在 FF14 貼上）")
+        self.lbl_status.config(text="分析與翻譯完成！點擊按鈕即可複製回覆。")
 
-# ==================== 主程式啟動 ====================
+    def copy_to_clipboard(self, text):
+        pyperclip.copy(text)
+        self.lbl_status.config(text=f"已複製: '{text}' 到剪貼簿！")
+
+
+# ==================== 主程式進入點 ====================
 if __name__ == "__main__":
     root = tk.Tk()
-    app = FF14TranslatorApp(root)
+    app = TranslatorApp(root)
     root.mainloop()
