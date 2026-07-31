@@ -7,22 +7,29 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from PIL import Image, ImageGrab
 
-# ==================== Azure 設定 (從環境變數讀取) ====================
-AZURE_KEY = os.getenv("AZURE_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
+# ==================== Azure 設定 (優先讀取 config.txt，其次讀取環境變數) ====================
+AZURE_KEY = None
+AZURE_ENDPOINT = None
 
-# 檢查環境變數是否正確設定
-if not AZURE_KEY or not AZURE_ENDPOINT:
-    print("\n[錯誤] 未偵測到 Azure 環境變數！")
-    print("請先設定以下環境變數後再執行程式：")
-    print(" - AZURE_KEY")
-    print(" - AZURE_ENDPOINT")
-    print("\nLinux / Codespaces 設定範例：")
-    print(" export AZURE_KEY=\"你的API金鑰\"")
-    print(" export AZURE_ENDPOINT=\"https://<你的服務名稱>.cognitiveservices.azure.com/\"\n")
-    print("Windows CMD 設定範例：")
-    print(" set AZURE_KEY=\"你的API金鑰\"")
-    print(" set AZURE_ENDPOINT=\"https://<你的服務名稱>.cognitiveservices.azure.com/\"\n")
+# 1. 嘗試從同資料夾下的 config.txt 讀取
+config_file = "config.txt"
+if os.path.exists(config_file):
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("AZURE_KEY="):
+                    AZURE_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif line.startswith("AZURE_ENDPOINT="):
+                    AZURE_ENDPOINT = line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception as e:
+        print(f"讀取 config.txt 失敗: {e}")
+
+# 2. 如果 config.txt 沒拿到，再嘗試從系統環境變數讀取
+if not AZURE_KEY:
+    AZURE_KEY = os.getenv("AZURE_KEY")
+if not AZURE_ENDPOINT:
+    AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 
 # ==================== 1. Azure Vision OCR 核心 ====================
 def ocr_japanese_image(image_path):
