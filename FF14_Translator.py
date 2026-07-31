@@ -76,7 +76,7 @@ def generate_gemini_replies(chat_text):
     """
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-3.5-flash-lite')
         response = model.generate_content(prompt)
         raw_text = response.text.strip()
         
